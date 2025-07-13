@@ -1,5 +1,7 @@
 from typing import List, Optional, Dict, Tuple
 
+from .validating import validate_battlefield
+
 
 
 VERTICAL_KEYS = {
@@ -29,7 +31,7 @@ HORIZONTAL_KEYS = {
 }
 
 battleField = [[1, 0, 0, 0, 0, 1, 1, 0, 0, 0],
-                [1, 0, 1, 0, 0, 0, 0, 0, 1, 0],
+                [0, 0, 1, 0, 0, 0, 0, 0, 1, 0],
                 [1, 0, 1, 0, 1, 1, 1, 0, 1, 0],
                 [1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
                 [0, 0, 0, 0, 0, 0, 0, 0, 1, 0],
@@ -41,8 +43,10 @@ battleField = [[1, 0, 0, 0, 0, 1, 1, 0, 0, 0],
 
 
 def list_field_to_dict(field: List[List[int]]) -> dict:
-
     
+    if not validate_battlefield(field):
+        raise ValueError('Invalid battlefield')
+
 
     field_dict = {}
 
