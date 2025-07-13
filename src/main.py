@@ -31,7 +31,7 @@ HORIZONTAL_KEYS = {
 }
 
 battleField = [[1, 0, 0, 0, 0, 1, 1, 0, 0, 0],
-                [0, 0, 1, 0, 0, 0, 0, 0, 1, 0],
+                [1, 0, 1, 0, 0, 0, 0, 0, 1, 0],
                 [1, 0, 1, 0, 1, 1, 1, 0, 1, 0],
                 [1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
                 [0, 0, 0, 0, 0, 0, 0, 0, 1, 0],
@@ -133,7 +133,8 @@ class Cell:
             self.is_miss = True
         
         if self.ship:
-            pass
+            self.ship.check_killed()
+
             
     def get_state(self):
         
@@ -213,6 +214,21 @@ class BattleField:
                         ship_cell._set_ship(ship)
         
         self.ships = ships
+    
+    def hit(self, x: str, y: str):
+        cell = self.field[y][x]
+        cell.hit()
+        
+    def is_game_over(self):
+        
+        for ship in self.ships:
+            if ship.get_state() == 'alive':
+                return False
+        
+        return True
+    
+        
+
 
 a = BattleField(battleField)
 
