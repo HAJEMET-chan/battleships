@@ -1,6 +1,7 @@
 // gui/components/GamePlay.js
 import React from 'react';
 import Board from './Board';
+import '../styles/App.css'; // Import the CSS file
 
 const GamePlay = ({ currentPlayer, opponentPlayer, onShotMade, message, setMessage }) => {
   // Handles clicking on a cell during gameplay (to make a shot)
@@ -16,9 +17,9 @@ const GamePlay = ({ currentPlayer, opponentPlayer, onShotMade, message, setMessa
   };
 
   return (
-    <div className="flex flex-col items-center">
-      <h2 className="text-2xl font-bold mb-4 text-gray-800">{currentPlayer.name}'s Turn to Shoot!</h2>
-      <div className="grid md:grid-cols-2 gap-8">
+    <div className="gameplay-section">
+      <h2 className="gameplay-title">{currentPlayer.name}'s Turn to Shoot!</h2>
+      <div className="game-boards-grid">
         {/* Current Player's Own Board (ships visible, not clickable for shots) */}
         <Board
           battlefield={currentPlayer.ownField}
@@ -34,7 +35,7 @@ const GamePlay = ({ currentPlayer, opponentPlayer, onShotMade, message, setMessa
           onCellClick={handleCellClick} // Opponent's board is clickable for shots
         />
       </div>
-      <p className="mt-4 text-lg font-bold text-red-600">{message}</p>
+      <p className="message-text">{message}</p>
     </div>
   );
 };

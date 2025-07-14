@@ -3,6 +3,8 @@ import React, { useState, useCallback } from 'react';
 import { BattleField } from './logic/GameClasses';
 import ShipPlacement from './components/ShipPlacement';
 import GamePlay from './components/GamePlay';
+import Board from './components/Board'; // Import Board for Game Over screen
+import './styles/App.css'; // Import the new CSS file
 
 // Main App Component
 function App() {
@@ -68,8 +70,8 @@ function App() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-500 to-indigo-600 text-white font-inter flex flex-col items-center justify-center p-4">
-      <h1 className="text-4xl md:text-5xl font-extrabold mb-8 text-shadow-lg">
+    <div className="app-container">
+      <h1 className="main-title">
         Морской бой (Battleship)
       </h1>
 
@@ -93,10 +95,10 @@ function App() {
       )}
 
       {gamePhase === 'gameOver' && (
-        <div className="flex flex-col items-center p-6 bg-green-700 rounded-lg shadow-xl">
-          <h2 className="text-3xl font-bold mb-4">Game Over!</h2>
-          <p className="text-2xl mb-6">{winner} has won the game!</p>
-          <div className="grid md:grid-cols-2 gap-8">
+        <div className="game-over-section">
+          <h2 className="game-over-title">Game Over!</h2>
+          <p className="game-over-message">{winner} has won the game!</p>
+          <div className="game-boards-grid">
             <Board
               battlefield={players[0].ownField}
               playerName={players[0].name}
@@ -112,7 +114,7 @@ function App() {
           </div>
           <button
             onClick={resetGame}
-            className="mt-8 px-8 py-4 bg-yellow-500 text-white font-bold text-xl rounded-lg shadow-lg hover:bg-yellow-600 transition duration-200"
+            className="play-again-button"
           >
             Play Again
           </button>

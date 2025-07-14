@@ -2,6 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import Board from './Board';
 import { SHIP_CONFIG, VERTICAL_KEYS } from '../logic/GameClasses'; // Import constants
+import '../styles/App.css'; // Import the CSS file
 
 const ShipPlacement = ({ player, onShipPlaced, message, setMessage }) => {
   const [currentShipCoords, setCurrentShipCoords] = useState([]);
@@ -110,8 +111,8 @@ const ShipPlacement = ({ player, onShipPlaced, message, setMessage }) => {
   );
 
   return (
-    <div className="flex flex-col items-center">
-      <h2 className="text-2xl font-bold mb-4 text-gray-800">{player.name}'s Turn to Place Ships</h2>
+    <div className="placement-section">
+      <h2 className="placement-title">{player.name}'s Turn to Place Ships</h2>
       <Board
         battlefield={player.ownField}
         playerName={player.name}
@@ -120,20 +121,20 @@ const ShipPlacement = ({ player, onShipPlaced, message, setMessage }) => {
         isPlacingShip={true}
         currentShipCoords={currentShipCoords}
       />
-      <div className="mt-4 p-4 bg-gray-50 rounded-lg shadow-inner w-full max-w-md">
-        <h3 className="text-xl font-semibold mb-2 text-gray-700">Ship Placement Status:</h3>
-        <ul className="list-disc list-inside mb-4">
+      <div className="placement-status-card">
+        <h3 className="status-title">Ship Placement Status:</h3>
+        <ul className="ship-list">
           {Object.entries(SHIP_CONFIG).sort((a, b) => b[0] - a[0]).map(([length, required]) => (
-            <li key={length} className="text-gray-600">
-              {required} x {length}-deck ship(s): <span className="font-medium">{(placedShipsCount[length] || 0)}/{required} placed</span>
+            <li key={length} className="ship-item">
+              {required} x {length}-deck ship(s): <span className="ship-item-count">{(placedShipsCount[length] || 0)}/{required} placed</span>
             </li>
           ))}
         </ul>
-        <p className="text-lg font-bold text-red-600 mb-2">{message}</p>
-        <div className="flex justify-center space-x-4">
+        <p className="message-text">{message}</p>
+        <div className="placement-buttons">
           <button
             onClick={placeCurrentShip}
-            className="px-6 py-2 bg-green-600 text-white font-semibold rounded-lg shadow-md hover:bg-green-700 transition duration-200 disabled:opacity-50"
+            className="btn btn-green"
             // Disable if no cells selected, or if ship length is invalid, or if too many of this ship type are already placed
             disabled={
               currentShipLength === 0 ||
@@ -145,7 +146,7 @@ const ShipPlacement = ({ player, onShipPlaced, message, setMessage }) => {
           </button>
           <button
             onClick={resetPlacement}
-            className="px-6 py-2 bg-yellow-500 text-white font-semibold rounded-lg shadow-md hover:bg-yellow-600 transition duration-200"
+            className="btn btn-yellow"
           >
             Reset Selection
           </button>
@@ -153,7 +154,7 @@ const ShipPlacement = ({ player, onShipPlaced, message, setMessage }) => {
         {allShipsPlaced && (
           <button
             onClick={onShipPlaced}
-            className="mt-4 w-full px-6 py-3 bg-blue-600 text-white font-bold text-lg rounded-lg shadow-lg hover:bg-blue-700 transition duration-200"
+            className="btn btn-blue"
           >
             Finish Placement for {player.name}
           </button>

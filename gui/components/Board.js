@@ -1,7 +1,8 @@
 // gui/components/Board.js
 import React, { useState, useCallback } from 'react';
 import CellComponent from './CellComponent';
-import { VERTICAL_KEYS, HORIZONTAL_KEYS, BOARD_SIZE } from '../logic/GameClasses'; // Import constants
+import { VERTICAL_KEYS, HORIZONTAL_KEYS } from '../logic/GameClasses'; // Import constants
+import '../styles/App.css'; // Import the CSS file
 
 const Board = ({ battlefield, playerName, isPlayerOwnBoard, onCellClick, isPlacingShip, currentShipCoords }) => {
   const [hoveredCoords, setHoveredCoords] = useState([]);
@@ -64,13 +65,13 @@ const Board = ({ battlefield, playerName, isPlayerOwnBoard, onCellClick, isPlaci
   }, [isPlacingShip]);
 
   return (
-    <div className="flex flex-col items-center p-4 bg-blue-100 rounded-lg shadow-md">
-      <h3 className="text-xl font-semibold mb-3 text-blue-800">{playerName}'s Board {isPlayerOwnBoard ? '(Your Ships)' : '(Opponent View)'}</h3>
-      <div className="grid grid-cols-[auto_repeat(10,_minmax(0,_1fr))] gap-0.5">
+    <div className="board-container">
+      <h3 className="board-title">{playerName}'s Board {isPlayerOwnBoard ? '(Your Ships)' : '(Opponent View)'}</h3>
+      <div className="grid-container">
         {/* Horizontal Headers */}
-        <div className="w-8 h-8 md:w-10 md:h-10"></div> {/* Empty corner */}
+        <div className="cell-header"></div> {/* Empty corner */}
         {HORIZONTAL_KEYS.map(x => (
-          <div key={x} className="flex items-center justify-center w-8 h-8 md:w-10 md:h-10 font-bold text-gray-700">
+          <div key={x} className="cell-header">
             {x}
           </div>
         ))}
@@ -78,7 +79,7 @@ const Board = ({ battlefield, playerName, isPlayerOwnBoard, onCellClick, isPlaci
         {/* Board Cells */}
         {VERTICAL_KEYS.map(y => (
           <React.Fragment key={y}>
-            <div className="flex items-center justify-center w-8 h-8 md:w-10 md:h-10 font-bold text-gray-700">
+            <div className="cell-header">
               {y}
             </div>
             {HORIZONTAL_KEYS.map(x => {
