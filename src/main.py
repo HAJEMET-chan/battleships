@@ -1,51 +1,10 @@
 from typing import List, Optional, Dict, Tuple
 
 from .validating import validate_battlefield
-
-
-
-VERTICAL_KEYS = {
-    0: 'А',
-    1: 'Б',
-    2: 'В',
-    3: 'Г',
-    4: 'Д',
-    5: 'Е',
-    6: 'Ж',
-    7: 'З',
-    8: 'И',
-    9: 'К'
-}
-
-HORIZONTAL_KEYS = {
-    0: '1',
-    1: '2',
-    2: '3',
-    3: '4',
-    4: '5',
-    5: '6',
-    6: '7',
-    7: '8',
-    8: '9',
-    9: '10'
-}
-
-battleField = [[1, 0, 0, 0, 0, 1, 1, 0, 0, 0],
-                [1, 0, 1, 0, 0, 0, 0, 0, 1, 0],
-                [1, 0, 1, 0, 1, 1, 1, 0, 1, 0],
-                [1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                [0, 0, 0, 0, 0, 0, 0, 0, 1, 0],
-                [0, 0, 0, 0, 1, 1, 1, 0, 0, 0],
-                [0, 0, 0, 0, 0, 0, 0, 0, 1, 0],
-                [0, 0, 0, 1, 0, 0, 0, 0, 0, 0],
-                [0, 0, 0, 0, 0, 0, 0, 1, 0, 0],
-                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]
-
+from .config import VERTICAL_KEYS, HORIZONTAL_KEYS, START_FIELD
 
 def list_field_to_dict(field: List[List[int]]) -> dict:
     
-    if not validate_battlefield(field):
-        raise ValueError('Invalid battlefield')
 
 
     field_dict = {}
@@ -125,6 +84,8 @@ class Cell:
         self.is_killed = False
         self.ship = ship
         self.position = (x, y)
+        self.can_place_ship = True
+    
 
     def hit(self):
         if self.is_part_of_ship:
@@ -135,6 +96,8 @@ class Cell:
         if self.ship:
             self.ship.check_killed()
 
+    def disable_placement(self):
+        self.can_place_ship = False
             
     def get_state(self):
         
@@ -147,6 +110,9 @@ class Cell:
         if self.is_killed:
             return 'killed'
         
+        if not self.can_place_ship:
+            return 'occupied'
+        
         return 'empty'
     
     def _set_ship(self, ship: Ship):
@@ -157,55 +123,49 @@ class Cell:
     
 class BattleField:
 
-    def __init__(self, field: List[List[int]]):
-        self.field: Dict[str, Dict[str, Cell]] = list_field_to_dict(field)
+    def __init__(self):
+        self.field: Dict[str, Dict[str, Cell]] = list_field_to_dict(START_FIELD)
         self.ships = []
-        self._find_ships()
-        
-    def _find_ships(self):
-        visited = set()
-        ships = []
 
+        
+    def _find_ships(self) -> List[Ship]:
+        visited = {}
         for y in self.field:
-            for x in self.field[y]:
+            visited[y] = {x: False for x in self.field[y]}
+        
+        ships = []
+        
+        for y in sorted(self.field.keys(), key=lambda k: list(VERTICAL_KEYS.values()).index(k)):
+            for x in sorted(self.field[y].keys(), key=lambda k: int(k)):
                 cell = self.field[y][x]
                 
-                if not cell.is_part_of_ship or (x, y) in visited:
+                if not cell.is_part_of_ship or visited[y][x]:
                     continue
-                
+
                 ship_cells = []
                 queue = [(x, y)]
                 
                 while queue:
                     current_x, current_y = queue.pop(0)
-                    if (current_x, current_y) in visited:
+                    if visited[current_y][current_x]:
                         continue
                     
-                    visited.add((current_x, current_y))
+                    visited[current_y][current_x] = True
                     current_cell = self.field[current_y][current_x]
                     ship_cells.append(current_cell)
-
-                    if current_x != '1':
-                        left_x = str(int(current_x) - 1)
-                        if left_x in self.field[current_y] and self.field[current_y][left_x].is_part_of_ship:
-                            queue.append((left_x, current_y))
                     
-                    if current_x != '10':
-                        right_x = str(int(current_x) + 1)
-                        if right_x in self.field[current_y] and self.field[current_y][right_x].is_part_of_ship:
-                            queue.append((right_x, current_y))
+                    # Проверяем соседние клетки (по горизонтали и вертикали)
+                    directions = self._get_neighbor_directions(current_x, current_y)
                     
-                    current_vertical_idx = [k for k, v in VERTICAL_KEYS.items() if v == current_y][0]
-                    if current_vertical_idx > 0:
-                        up_y = VERTICAL_KEYS[current_vertical_idx - 1]
-                        if current_x in self.field[up_y] and self.field[up_y][current_x].is_part_of_ship:
-                            queue.append((current_x, up_y))
-                    
-                    if current_vertical_idx < 9:
-                        down_y = VERTICAL_KEYS[current_vertical_idx + 1]
-                        if current_x in self.field[down_y] and self.field[down_y][current_x].is_part_of_ship:
-                            queue.append((current_x, down_y))
+                    for dx, dy in directions:
+                        nx, ny = dx, dy
+                        if (ny in self.field and 
+                            nx in self.field[ny] and 
+                            self.field[ny][nx].is_part_of_ship and 
+                            not visited[ny][nx]):
+                            queue.append((nx, ny))
                 
+
                 if ship_cells:
                     ship = Ship(ship_cells)
                     ships.append(ship)
@@ -214,13 +174,33 @@ class BattleField:
                         ship_cell._set_ship(ship)
         
         self.ships = ships
+
+    
+    def _get_neighbor_directions(self, x: str, y: str) -> List[tuple]:
+        directions = []
+        x_num = int(x)
+        y_idx = list(VERTICAL_KEYS.values()).index(y)
+        
+        if x_num > 1:
+            directions.append((str(x_num - 1), y))
+
+        if x_num < 10:
+            directions.append((str(x_num + 1), y))
+        
+        if y_idx > 0:
+            directions.append((x, VERTICAL_KEYS[y_idx - 1]))
+        
+        if y_idx < 9:
+            directions.append((x, VERTICAL_KEYS[y_idx + 1]))
+        
+        return directions
     
     def hit(self, x: str, y: str):
         cell = self.field[y][x]
         cell.hit()
         
     def is_game_over(self):
-        
+
         for ship in self.ships:
             if ship.get_state() == 'alive':
                 return False
@@ -230,7 +210,7 @@ class BattleField:
         
 
 
-a = BattleField(battleField)
+a = BattleField()
 
 
 
