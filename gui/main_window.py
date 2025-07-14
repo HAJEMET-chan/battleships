@@ -1,19 +1,29 @@
 # gui/main_window.py
 from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QMessageBox
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QTimer # Импортируем QTimer для безопасного обновления GUI из потоков
+from PySide6.QtGui import QColor, QBrush, QPainter
+from typing import Dict, Any, Optional
 import sys
+
 
 from .game_board_widget import GameBoardWidget
 from .player_setup_dialog import PlayerSetupDialog
+from .network_setup_dialog import NetworkSetupDialog # Новый импорт
 from .game_manager import GameManager
 from src.api import create_new_game, place_ship, make_shot, get_board_state, is_game_finished, validate_full_battlefield
 from src.main import BattleField # Импорт BattleField для подсказок типов
+from src.network_manager import NetworkHost, NetworkClient, NetworkManager # Импорт сетевых классов
+import threading # Для запуска сетевых операций в отдельном потоке
 
 class MainWindow(QMainWindow):
     """
     Главное окно приложения "Морской бой".
     Управляет общим макетом, переключением фаз игры и взаимодействием между игровыми полями.
     """
+    # Сигналы для безопасного обновления GUI из сетевых потоков
+    network_message_received = Signal(dict)
+    network_status_updated = Signal(bool, str)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Морской Бой!")
@@ -22,6 +32,10 @@ class MainWindow(QMainWindow):
         self.game_manager = GameManager()
         self.current_player_index = 0
         self.players = [] # Будет хранить имена игроков
+
+        self.network_manager: Optional[NetworkManager] = None
+        self.network_game_mode: str = "local" # "local", "host", "client"
+        self.network_opponent_name: str = "Противник" # Имя сетевого противника
 
         self._create_widgets()
         self._setup_layout()
@@ -58,7 +72,8 @@ class MainWindow(QMainWindow):
         self.message_label.setWordWrap(True)
         self.message_label.setStyleSheet("font-size: 14px; color: #333;")
 
-        self.reset_button = QPushButton("Начать новую игру")
+        self.reset_button = QPushButton("Начать новую игру (Локально)")
+        self.network_game_button = QPushButton("Сетевая игра") # Новая кнопка
         self.start_game_button = QPushButton("Начать битву!")
         self.start_game_button.setEnabled(False) # Включить после расстановки всех кораблей
 
@@ -67,6 +82,7 @@ class MainWindow(QMainWindow):
         self.info_layout.addStretch() # Отталкивает содержимое вверх
         self.info_layout.addWidget(self.start_game_button)
         self.info_layout.addWidget(self.reset_button)
+        self.info_layout.addWidget(self.network_game_button) # Добавляем новую кнопку
 
     def _setup_layout(self):
         """Настраивает основной макет окна."""
@@ -77,10 +93,15 @@ class MainWindow(QMainWindow):
     def _connect_signals(self):
         """Подключает сигналы виджетов к соответствующим слотам."""
         self.reset_button.clicked.connect(self._initialize_game)
+        self.network_game_button.clicked.connect(self._start_network_game_setup) # Подключаем новую кнопку
         self.start_game_button.clicked.connect(self._start_game_phase)
         # Подключаем оба виджета поля к одному обработчику кликов
         self.player1_board_widget.cell_clicked.connect(lambda x, y: self._on_board_click(self.player1_board_widget, x, y))
         self.player2_board_widget.cell_clicked.connect(lambda x, y: self._on_board_click(self.player2_board_widget, x, y))
+
+        # Подключаем сигналы для безопасного обновления GUI из сетевых потоков
+        self.network_message_received.connect(self._handle_network_message)
+        self.network_status_updated.connect(self._handle_network_status_update)
 
     def _on_board_click(self, clicked_board_widget: GameBoardWidget, x: str, y: str):
         """
@@ -111,7 +132,12 @@ class MainWindow(QMainWindow):
 
 
     def _initialize_game(self):
-        """Инициализирует новую игру, включая запрос имен игроков."""
+        """Инициализирует новую локальную игру, включая запрос имен игроков."""
+        self.network_game_mode = "local"
+        if self.network_manager:
+            self.network_manager.shutdown()
+            self.network_manager = None
+
         self.game_manager.reset_game()
         self.players = []
 
@@ -141,9 +167,196 @@ class MainWindow(QMainWindow):
         # Устанавливаем начальные состояния полей и интерактивность для расстановки Игрока 1
         self._update_board_displays() # Это теперь правильно установит интерактивность для Игрока 1
 
+    def _start_network_game_setup(self):
+        """Открывает диалог для настройки сетевой игры."""
+        if self.network_manager: # Если уже есть активное сетевое соединение
+            self.network_manager.shutdown()
+            self.network_manager = None
+
+        network_dialog = NetworkSetupDialog(self)
+        if network_dialog.exec() == NetworkSetupDialog.Accepted:
+            mode, ip = network_dialog.get_network_settings()
+            self.network_game_mode = mode
+            self.game_manager.reset_game() # Сброс локальной игры
+
+            player_names = []
+            if mode == "host":
+                player_names = ["Игрок 1 (Хост)", "Игрок 2 (Клиент)"]
+                self.network_manager = NetworkHost()
+                # Получаем IP-адреса хоста для отображения
+                host_ips_str = ", ".join(self.network_manager.host_ips)
+                # Включаем порт в сообщение
+                self.message_label.setText(f"Хост запущен. Ваши IP-адреса: {host_ips_str}. Порт: {self.network_manager.port}. Ожидание подключения...")
+                # Запускаем хост в отдельном потоке, чтобы не блокировать GUI
+                threading.Thread(target=self.network_manager.start_host, daemon=True).start()
+            else: # client
+                player_names = ["Игрок 2 (Клиент)", "Игрок 1 (Хост)"] # Для клиента, его имя - Игрок 2
+                self.network_manager = NetworkClient(ip)
+                self.message_label.setText(f"Попытка подключения к хосту {ip}:{self.network_manager.port}...")
+                # Запускаем клиент в отдельном потоке
+                threading.Thread(target=self.network_manager.connect_to_host, daemon=True).start()
+
+            self.players = player_names
+            for name in self.players:
+                self.game_manager.add_player(name)
+
+            # Устанавливаем коллбэки для сетевого менеджера
+            self.network_manager.set_callbacks(
+                message_cb=lambda msg: self.network_message_received.emit(msg),
+                status_cb=lambda status, msg: self.network_status_updated.emit(status, msg)
+            )
+
+            self.current_player_index = 0 # Локальный игрок всегда Игрок 1 в своем представлении
+            self._update_current_player_display()
+            self.start_game_button.setEnabled(False) # В сетевой игре кнопка "Начать битву" будет активирована по сети
+
+            self.game_manager.set_game_phase("network_setup")
+            self._update_board_displays() # Обновляем, чтобы показать пустые поля
+
+        else:
+            QMessageBox.information(self, "Сетевая игра отменена", "Настройка сетевой игры была отменена. Возврат к локальной игре.")
+            self._initialize_game() # Возвращаемся к локальной игре
+
+    def _handle_network_status_update(self, is_connected: bool, message: str):
+        """Обрабатывает обновления статуса сетевого соединения."""
+        self.message_label.setText(f"Сетевой статус: {message}")
+        if is_connected:
+            QMessageBox.information(self, "Соединение установлено", message)
+            # После установки соединения, переходим к фазе расстановки кораблей
+            self.game_manager.set_game_phase("placement")
+            self.message_label.setText(f"{self.players[self.current_player_index]}, расставьте свои корабли! ({self.game_manager._get_remaining_ships_message(self.players[self.current_player_index])})")
+            self._update_board_displays()
+        elif not is_connected and self.game_manager.game_phase != "network_setup":
+            QMessageBox.critical(self, "Ошибка сети", f"Соединение потеряно: {message}. Игра будет перезапущена локально.")
+            self._initialize_game() # Перезапускаем локальную игру при потере соединения
+
+    def _handle_network_message(self, message: Dict[str, Any]):
+        """Обрабатывает входящие сетевые сообщения."""
+        msg_type = message.get("type")
+        payload = message.get("payload")
+
+        if msg_type == "ship_placement":
+            # Противник расставил корабль. Обновляем его поле (для нашего представления).
+            # В сетевой игре каждый игрок расставляет на своем поле, а потом отправляет подтверждение.
+            # Здесь мы просто получаем сигнал, что противник закончил расстановку.
+            # Фактическое состояние поля противника будет обновляться только при выстрелах.
+            opponent_name = self.players[self._get_opponent_index()]
+            self.game_manager.ships_placed_count[opponent_name] = payload["ships_placed_count"]
+            if payload["finished_placement"]:
+                self.game_manager.set_player_placement_complete(opponent_name, True)
+                self.message_label.setText(f"{opponent_name} закончил расстановку кораблей.")
+                self._check_all_players_placed()
+
+        elif msg_type == "shot":
+            # Получен выстрел от противника
+            opponent_player_name = self.players[self._get_opponent_index()]
+            local_player_name = self.players[self.current_player_index] # Это наше поле, по которому стреляли
+            
+            # Проверяем, что это действительно наш ход, чтобы получить выстрел
+            if self.game_manager.current_turn_player_name != local_player_name:
+                QMessageBox.warning(self, "Ошибка хода", "Получен выстрел не в наш ход! Синхронизация нарушена.")
+                return
+
+            x, y = payload["x"], payload["y"]
+            battlefield_to_hit = self.game_manager.battlefields[local_player_name] # Противник стреляет по нашему полю
+
+            shot_result = make_shot(battlefield_to_hit, x, y)
+            self.message_label.setText(f"Противник выстрелил по {x}{y}. Результат: {shot_result['message']}")
+            self._update_board_displays()
+
+            # Отправляем результат выстрела обратно противнику
+            self.network_manager.send_game_data("shot_result", {
+                "x": x,
+                "y": y,
+                "cell_state": shot_result["cell_state"],
+                "ship_sunk_id": shot_result["ship_sunk_id"],
+                "game_over": shot_result["game_over"],
+                "message": shot_result["message"] # Включаем сообщение для удобства
+            })
+
+            if shot_result["game_over"]:
+                QMessageBox.information(self, "Игра окончена!", f"Все ваши корабли потоплены! {opponent_player_name} побеждает!")
+                self.message_label.setText(f"Игра окончена! {opponent_player_name} побеждает!")
+                self.game_manager.set_game_phase("game_over")
+                self.player1_board_widget.set_interactive(False)
+                self.player2_board_widget.set_interactive(False)
+            elif shot_result["cell_state"] == "hit" or shot_result["cell_state"] == "killed":
+                # Если противник попал, его ход продолжается. Мы просто ждем следующего выстрела.
+                self.message_label.setText(f"Противник попал! Ждем следующего выстрела от {opponent_player_name}.")
+            else: # Промах
+                # Если противник промахнулся, ход переходит к нам
+                self.message_label.setText(f"Противник промахнулся! Ваш ход, {local_player_name}.")
+                self._switch_turn_network() # Переключаем ход на локального игрока
+
+        elif msg_type == "shot_result":
+            # Получен результат нашего выстрела от противника
+            x, y = payload["x"], payload["y"]
+            cell_state = payload["cell_state"]
+            ship_sunk_id = payload["ship_sunk_id"]
+            game_over = payload["game_over"]
+            message = payload.get("message", cell_state) # Получаем сообщение
+
+            # Обновляем наше представление поля противника на основе полученного результата
+            # Здесь мы можем обновить состояние соответствующей клетки на поле player2_board_widget
+            # (которое отображает поле противника)
+            opponent_battlefield = self.game_manager.battlefields[self.players[self._get_opponent_index()]]
+            # Имитируем hit/miss для обновления состояния клетки на нашем локальном представлении
+            # (хотя фактический hit произошел на поле противника)
+            cell = opponent_battlefield.field[y][x]
+            if cell_state == "hit" or cell_state == "killed":
+                cell.is_hit = True
+                cell.is_part_of_ship = True # Помечаем как часть корабля, чтобы отобразить "X"
+                if cell_state == "killed":
+                    # Если корабль потоплен, можно пометить все его части как killed
+                    # Для этого нужно будет найти все клетки этого корабля на нашем поле противника
+                    # и пометить их как killed. Это сложнее, пока просто отобразим "X".
+                    pass
+            elif cell_state == "miss":
+                cell.is_miss = True
+
+            self._update_board_displays()
+            self.message_label.setText(f"Ваш выстрел по {x}{y}: {message}")
+
+
+            if game_over:
+                QMessageBox.information(self, "Игра окончена!", f"Поздравляем, {self.players[self.current_player_index]}! Вы потопили все корабли противника!")
+                self.message_label.setText(f"Игра окончена! {self.players[self.current_player_index]} побеждает!")
+                self.game_manager.set_game_phase("game_over")
+                self.player1_board_widget.set_interactive(False)
+                self.player2_board_widget.set_interactive(False)
+            elif cell_state == "hit" or cell_state == "killed":
+                # Если мы попали, наш ход продолжается
+                self.message_label.setText(f"{self.players[self.current_player_index]}, вы попали! Стреляйте снова!")
+            else: # Промах
+                self.message_label.setText(f"{self.players[self.current_player_index]}, вы промахнулись! Ход переходит к противнику.")
+                self._switch_turn_network() # Переключаем ход на противника
+
+        elif msg_type == "game_start":
+            # Получено сообщение о начале игры от хоста
+            if self.network_game_mode == "client":
+                self.message_label.setText("Хост начал игру! Приготовьтесь к битве.")
+                self.game_manager.set_game_phase("in_progress")
+                # Ход определяется хостом, устанавливаем его в game_manager
+                self.game_manager.set_current_turn_player_name(self.players[payload["starting_player_index"]])
+                self._update_current_player_display()
+                self._update_board_displays() # Обновит интерактивность на основе current_turn_player_name
+                if self.game_manager.current_turn_player_name == self.players[0]: # Если наш ход
+                    self.message_label.setText(f"Ваш ход, {self.players[0]}! Выстрелите по полю противника.")
+                else:
+                    self.message_label.setText(f"Ход противника. Ожидаем выстрела от {self.players[self._get_opponent_index()]}.")
+
+
     def _update_current_player_display(self):
         """Обновляет метку с именем текущего игрока."""
-        self.current_player_label.setText(f"Текущий игрок: {self.players[self.current_player_index]}")
+        # В сетевой игре current_player_index всегда 0 для локального игрока,
+        # а _get_opponent_index() - 1.
+        # Сообщение о ходе будет более явным.
+        if self.network_game_mode == "local":
+            self.current_player_label.setText(f"Текущий игрок: {self.players[self.current_player_index]}")
+        else:
+            # В сетевой игре "Вы играете за:" всегда отображает имя локального игрока
+            self.current_player_label.setText(f"Вы играете за: {self.players[0]}")
+
 
     def _update_board_displays(self):
         """
@@ -151,48 +364,62 @@ class MainWindow(QMainWindow):
         в зависимости от текущей фазы игры и активного игрока.
         """
         player1_name = self.players[0]
-        player2_name = self.players[1]
+        player2_name = self.players[1] # Это всегда противник в сетевой игре
 
         if self.game_manager.game_phase == "placement":
-            if self.current_player_index == 0: # Игрок 1 расставляет корабли
+            # В локальной игре:
+            if self.network_game_mode == "local":
+                if self.current_player_index == 0: # Игрок 1 расставляет корабли
+                    self.player1_board_widget.update_board(get_board_state(self.game_manager.battlefields[player1_name], show_ships=True))
+                    self.player2_board_widget.update_board(get_board_state(self.game_manager.battlefields[player2_name], show_ships=False)) # Поле противника скрыто
+                    self.player1_label.setText(f"{player1_name}'s Board (Ваши корабли)")
+                    self.player2_label.setText(f"{player2_name}'s Board (Скрыто)")
+                    self.player1_board_widget.set_interactive(True)
+                    self.player2_board_widget.set_interactive(False)
+                    self.player1_board_widget.highlight_cells(self.game_manager.current_player_placement_coords[player1_name])
+                    self.player2_board_widget.highlight_cells([])
+                else: # Игрок 2 расставляет корабли
+                    self.player1_board_widget.update_board(get_board_state(self.game_manager.battlefields[player1_name], show_ships=False)) # Поле противника скрыто
+                    self.player2_board_widget.update_board(get_board_state(self.game_manager.battlefields[player2_name], show_ships=True))
+                    self.player1_label.setText(f"{player1_name}'s Board (Скрыто)")
+                    self.player2_label.setText(f"{player2_name}'s Board (Ваши корабли)")
+                    self.player1_board_widget.set_interactive(False)
+                    self.player2_board_widget.set_interactive(True)
+                    self.player2_board_widget.highlight_cells(self.game_manager.current_player_placement_coords[player2_name])
+                    self.player1_board_widget.highlight_cells([])
+            # В сетевой игре (фаза расстановки):
+            else: # network_game_mode is "host" or "client"
+                # Всегда показываем собственное поле слева, поле противника справа
                 self.player1_board_widget.update_board(get_board_state(self.game_manager.battlefields[player1_name], show_ships=True))
-                self.player2_board_widget.update_board(get_board_state(self.game_manager.battlefields[player2_name], show_ships=False)) # Поле противника скрыто
+                self.player2_board_widget.update_board(get_board_state(self.game_manager.battlefields[player2_name], show_ships=False)) # Поле противника всегда скрыто
+
                 self.player1_label.setText(f"{player1_name}'s Board (Ваши корабли)")
                 self.player2_label.setText(f"{player2_name}'s Board (Скрыто)")
-                self.player1_board_widget.set_interactive(True)
-                self.player2_board_widget.set_interactive(False)
-                # Выделяем клетки на активном поле текущего игрока
+
+                self.player1_board_widget.set_interactive(True) # Свое поле интерактивно для расстановки
+                self.player2_board_widget.set_interactive(False) # Поле противника не интерактивно
+
                 self.player1_board_widget.highlight_cells(self.game_manager.current_player_placement_coords[player1_name])
-                self.player2_board_widget.highlight_cells([]) # Убеждаемся, что другое поле не выделено
-            else: # Игрок 2 расставляет корабли
-                self.player1_board_widget.update_board(get_board_state(self.game_manager.battlefields[player1_name], show_ships=False)) # Поле противника скрыто
-                self.player2_board_widget.update_board(get_board_state(self.game_manager.battlefields[player2_name], show_ships=True))
-                self.player1_label.setText(f"{player1_name}'s Board (Скрыто)")
-                self.player2_label.setText(f"{player2_name}'s Board (Ваши корабли)")
-                self.player1_board_widget.set_interactive(False)
-                self.player2_board_widget.set_interactive(True)
-                # Выделяем клетки на активном поле текущего игрока
-                self.player2_board_widget.highlight_cells(self.game_manager.current_player_placement_coords[player2_name])
-                self.player1_board_widget.highlight_cells([]) # Убеждаемся, что другое поле не выделено
+                self.player2_board_widget.highlight_cells([])
 
         elif self.game_manager.game_phase == "in_progress":
             # В фазе игры, текущий игрок видит свое поле (корабли видны) и поле противника (корабли скрыты).
             # Интерактивным полем всегда является поле противника.
-            if self.current_player_index == 0: # Ход Игрока 1
-                self.player1_board_widget.update_board(get_board_state(self.game_manager.battlefields[player1_name], show_ships=True))
-                self.player2_board_widget.update_board(get_board_state(self.game_manager.battlefields[player2_name], show_ships=False))
-                self.player1_label.setText(f"{player1_name}'s Board (Ваши корабли)")
-                self.player2_label.setText(f"{player2_name}'s Board (Воды противника)")
+            # В сетевой игре: player1_board_widget - всегда наше поле, player2_board_widget - всегда поле противника
+            self.player1_board_widget.update_board(get_board_state(self.game_manager.battlefields[player1_name], show_ships=True))
+            self.player2_board_widget.update_board(get_board_state(self.game_manager.battlefields[player2_name], show_ships=False))
+            self.player1_label.setText(f"{player1_name}'s Board (Ваши корабли)")
+            self.player2_label.setText(f"{player2_name}'s Board (Воды противника)")
+
+            # Интерактивность в сетевой игре зависит от того, чей сейчас ход (локальный или удаленный)
+            if self.game_manager.current_turn_player_name == player1_name: # Если наш ход
                 self.player1_board_widget.set_interactive(False) # Свое поле не для стрельбы
                 self.player2_board_widget.set_interactive(True)  # Поле противника для стрельбы
-
-            else: # Ход Игрока 2
-                self.player1_board_widget.update_board(get_board_state(self.game_manager.battlefields[player1_name], show_ships=False)) # Поле противника для стрельбы
-                self.player2_board_widget.update_board(get_board_state(self.game_manager.battlefields[player2_name], show_ships=True))
-                self.player1_label.setText(f"{player1_name}'s Board (Воды противника)")
-                self.player2_label.setText(f"{player2_name}'s Board (Ваши корабли)")
-                self.player1_board_widget.set_interactive(True)  # Поле противника для стрельбы
-                self.player2_board_widget.set_interactive(False) # Свое поле не для стрельбы
+            else: # Ход противника
+                self.player1_board_widget.set_interactive(False)
+                self.player2_board_widget.set_interactive(False)
+                # Сообщение о ходе противника уже установлено в _handle_network_message или _switch_turn_network
+                # self.message_label.setText(f"Ход противника. Ожидаем выстрела от {self.players[self._get_opponent_index()]}.")
 
             self.player1_board_widget.highlight_cells([]) # Очищаем выделения от расстановки
             self.player2_board_widget.highlight_cells([]) # Очищаем выделения от расстановки
@@ -208,6 +435,18 @@ class MainWindow(QMainWindow):
             self.player2_board_widget.update_board(get_board_state(self.game_manager.battlefields[player2_name], show_ships=True))
             self.player1_label.setText(f"{player1_name}'s Board (Ваши корабли)")
             self.player2_label.setText(f"{player2_name}'s Board (Ваши корабли)") # Для просмотра после игры
+
+        elif self.game_manager.game_phase == "network_setup":
+            # В фазе сетевой настройки поля неинтерактивны и пустые
+            self.player1_board_widget.update_board(get_board_state(create_new_game(), show_ships=False))
+            self.player2_board_widget.update_board(get_board_state(create_new_game(), show_ships=False))
+            self.player1_label.setText(f"{player1_name}'s Board")
+            self.player2_label.setText(f"{player2_name}'s Board")
+            self.player1_board_widget.set_interactive(False)
+            self.player2_board_widget.set_interactive(False)
+            self.player1_board_widget.highlight_cells([])
+            self.player2_board_widget.highlight_cells([])
+
 
         # Убеждаемся, что обновления распространяются
         self.player1_board_widget.update()
@@ -236,20 +475,46 @@ class MainWindow(QMainWindow):
 
         if result["finished_placement"]:
             QMessageBox.information(self, "Расстановка завершена", f"Расстановка кораблей для {current_player_name} завершена!")
-            # Переключаем игрока или начинаем игру
-            if self.current_player_index == 0:
-                self.current_player_index = 1
-                self._update_current_player_display()
-                # Обновляем доски, чтобы показать пустое поле следующего игрока для расстановки
-                self._update_board_displays()
-                self.message_label.setText(f"{self.players[self.current_player_index]}, расставьте свои корабли! ({self.game_manager._get_remaining_ships_message(self.players[self.current_player_index])})")
-            else:
-                # Оба игрока расставили корабли
+
+            # В сетевой игре отправляем сообщение о завершении расстановки
+            if self.network_game_mode != "local" and self.network_manager and self.network_manager.is_connected:
+                self.network_manager.send_game_data("ship_placement", {
+                    "player_name": current_player_name,
+                    "finished_placement": True,
+                    "ships_placed_count": self.game_manager.ships_placed_count[current_player_name]
+                })
+                self.game_manager.set_player_placement_complete(current_player_name, True)
+                self.message_label.setText(f"Вы закончили расстановку. Ожидаем, пока {self.players[self._get_opponent_index()]} закончит.")
+                self._check_all_players_placed() # Проверяем, готовы ли оба игрока
+            else: # Локальная игра
+                # Переключаем игрока или начинаем игру
+                if self.current_player_index == 0:
+                    self.current_player_index = 1
+                    self._update_current_player_display()
+                    # Обновляем доски, чтобы показать пустое поле следующего игрока для расстановки
+                    self._update_board_displays()
+                    self.message_label.setText(f"{self.players[self.current_player_index]}, расставьте свои корабли! ({self.game_manager._get_remaining_ships_message(self.players[self.current_player_index])})")
+                else:
+                    # Оба игрока расставили корабли
+                    self.start_game_button.setEnabled(True)
+                    self.message_label.setText("Все корабли расставлены! Нажмите 'Начать битву!', чтобы начать сражение.")
+                    self.game_manager.set_game_phase("pre_game_ready")
+                    self.player1_board_widget.set_interactive(False)
+                    self.player2_board_widget.set_interactive(False)
+
+    def _check_all_players_placed(self):
+        """Проверяет, расставили ли оба игрока корабли в сетевой игре."""
+        if self.network_game_mode != "local" and self.game_manager.are_all_players_placed():
+            self.start_game_button.setEnabled(True) # В сетевой игре это кнопка для хоста
+            self.message_label.setText("Оба игрока расставили корабли. Нажмите 'Начать битву!' (только хост).")
+            self.game_manager.set_game_phase("pre_game_ready")
+            self.player1_board_widget.set_interactive(False)
+            self.player2_board_widget.set_interactive(False)
+            # Хост может начать игру
+            if self.network_game_mode == "host":
                 self.start_game_button.setEnabled(True)
-                self.message_label.setText("Все корабли расставлены! Нажмите 'Начать битву!', чтобы начать сражение.")
-                self.game_manager.set_game_phase("pre_game_ready")
-                self.player1_board_widget.set_interactive(False)
-                self.player2_board_widget.set_interactive(False)
+            else:
+                self.start_game_button.setEnabled(False) # Клиент ждет команды от хоста
 
 
     def _start_game_phase(self):
@@ -273,9 +538,20 @@ class MainWindow(QMainWindow):
 
         self.game_manager.set_game_phase("in_progress")
         self.start_game_button.setEnabled(False)
-        self.current_player_index = 0 # Игрок 1 начинает первым
-        self._update_current_player_display()
-        self.message_label.setText(f"{self.players[self.current_player_index]}, ваш ход! Выстрелите по полю {self.players[self._get_opponent_index()]}.")
+
+        if self.network_game_mode == "local":
+            self.current_player_index = 0 # Игрок 1 начинает первым
+            self.game_manager.set_current_turn_player_name(self.players[self.current_player_index]) # Устанавливаем текущий ход
+            self._update_current_player_display()
+            self.message_label.setText(f"{self.players[self.current_player_index]}, ваш ход! Выстрелите по полю {self.players[self._get_opponent_index()]}.")
+        else: # Сетевая игра
+            # Хост определяет, кто начинает первым (например, всегда хост)
+            starting_player_name = self.players[0] # Локальный игрок (хост) начинает
+            self.game_manager.set_current_turn_player_name(starting_player_name)
+            # Отправляем сообщение клиенту о начале игры и кто начинает
+            self.network_manager.send_game_data("game_start", {"starting_player_index": 0}) # 0 - это всегда локальный игрок
+            self.message_label.setText(f"Вы начинаете! Ваш ход, {self.players[0]}! Выстрелите по полю противника.")
+
 
         # Устанавливаем интерактивность полей для фазы стрельбы
         self._update_board_displays() # Обновляем, чтобы установить правильную интерактивность
@@ -284,35 +560,50 @@ class MainWindow(QMainWindow):
         """
         Обрабатывает клики по полю для совершения выстрелов.
         """
+        # В сетевой игре, если сейчас не наш ход, игнорируем клик
+        if self.network_game_mode != "local" and self.game_manager.current_turn_player_name != self.players[self.current_player_index]:
+            self.message_label.setText("Сейчас не ваш ход. Ожидайте выстрела противника.")
+            return
+
         current_player_name = self.players[self.current_player_index]
         opponent_player_name = self.players[self._get_opponent_index()]
         opponent_battlefield = self.game_manager.battlefields[opponent_player_name]
 
-        shot_result = make_shot(opponent_battlefield, x, y)
-        self.message_label.setText(shot_result["message"])
+        if self.network_game_mode == "local":
+            shot_result = make_shot(opponent_battlefield, x, y)
+            self.message_label.setText(shot_result["message"])
 
-        if shot_result["success"]:
-            self._update_board_displays() # Обновляем оба поля, чтобы отразить выстрел
+            if shot_result["success"]:
+                self._update_board_displays() # Обновляем оба поля, чтобы отразить выстрел
 
-            if shot_result["game_over"]:
-                QMessageBox.information(self, "Игра окончена!", f"Поздравляем, {current_player_name}! Вы потопили все корабли {opponent_player_name}!")
-                self.message_label.setText(f"Игра окончена! {current_player_name} побеждает!")
-                self.game_manager.set_game_phase("game_over")
-                self.player1_board_widget.set_interactive(False)
-                self.player2_board_widget.set_interactive(False)
-            elif shot_result["cell_state"] == "hit" or shot_result["cell_state"] == "killed":
-                # Текущий игрок получает еще один ход, если попал или потопил
-                self.message_label.setText(f"{current_player_name}, вы попали! Стреляйте снова!")
-            else: # Промах
-                self.message_label.setText(f"{current_player_name}, вы промахнулись! Ход переходит к {opponent_player_name}.")
-                self._switch_turn()
-        else:
-            self.message_label.setText(f"Неверный выстрел: {shot_result['message']}")
+                if shot_result["game_over"]:
+                    QMessageBox.information(self, "Игра окончена!", f"Поздравляем, {current_player_name}! Вы потопили все корабли {opponent_player_name}!")
+                    self.message_label.setText(f"Игра окончена! {current_player_name} побеждает!")
+                    self.game_manager.set_game_phase("game_over")
+                    self.player1_board_widget.set_interactive(False)
+                    self.player2_board_widget.set_interactive(False)
+                elif shot_result["cell_state"] == "hit" or shot_result["cell_state"] == "killed":
+                    # Текущий игрок получает еще один ход, если попал или потопил
+                    self.message_label.setText(f"{current_player_name}, вы попали! Стреляйте снова!")
+                else: # Промах
+                    self.message_label.setText(f"{current_player_name}, вы промахнулись! Ход переходит к {opponent_player_name}.")
+                    self._switch_turn_local()
+            else:
+                self.message_label.setText(f"Неверный выстрел: {shot_result['message']}")
+        else: # Сетевая игра
+            if self.network_manager and self.network_manager.is_connected:
+                # Отправляем выстрел противнику
+                self.network_manager.send_game_data("shot", {"x": x, "y": y})
+                self.message_label.setText(f"Выстрел по {x}{y} отправлен. Ожидаем ответа противника...")
+                self.player2_board_widget.set_interactive(False) # Блокируем поле пока ждем ответа
+            else:
+                self.message_label.setText("Нет активного сетевого соединения.")
 
 
-    def _switch_turn(self):
-        """Переключает ход между игроками."""
+    def _switch_turn_local(self):
+        """Переключает ход между игроками в локальной игре."""
         self.current_player_index = 1 - self.current_player_index # Переключаемся между 0 и 1
+        self.game_manager.set_current_turn_player_name(self.players[self.current_player_index]) # Обновляем текущий ход в менеджере
         self._update_current_player_display()
         # Обновляем доски, чтобы отразить вид нового игрока и интерактивность
         self._update_board_displays()
@@ -320,8 +611,34 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Смена хода", f"Теперь ход {self.players[self.current_player_index]}. Отвернитесь, {self.players[self._get_opponent_index()]}!")
         self.message_label.setText(f"{self.players[self.current_player_index]}, ваш ход! Выстрелите по полю {self.players[self._get_opponent_index()]}.")
 
+    def _switch_turn_network(self):
+        """Переключает ход в сетевой игре."""
+        # В сетевой игре current_player_index всегда 0 (локальный игрок)
+        # Мы просто меняем, чей ход в game_manager
+        current_turn_player = self.game_manager.current_turn_player_name
+        if current_turn_player == self.players[0]: # Если был наш ход
+            self.game_manager.set_current_turn_player_name(self.players[1]) # Ход противника
+            self.message_label.setText(f"Ход противника. Ожидаем выстрела от {self.players[self._get_opponent_index()]}.")
+            self.player2_board_widget.set_interactive(False) # Блокируем свое поле
+        else: # Если был ход противника
+            self.game_manager.set_current_turn_player_name(self.players[0]) # Наш ход
+            self.message_label.setText(f"Ваш ход, {self.players[self.current_player_index]}! Выстрелите по полю противника.")
+            self.player2_board_widget.set_interactive(True) # Разблокируем поле противника для выстрела
+
+        self._update_current_player_display()
+        self._update_board_displays()
+
 
     def _get_opponent_index(self) -> int:
         """Возвращает индекс противника текущего игрока."""
+        # В локальной игре это просто 1 - current_player_index
+        # В сетевой игре, если current_player_index - это мы (0), то противник - 1.
+        # Если current_player_index - это противник (1), то мы - 0.
         return 1 - self.current_player_index
+
+    def closeEvent(self, event):
+        """Обработчик события закрытия окна."""
+        if self.network_manager:
+            self.network_manager.shutdown() # Корректно закрываем сетевое соединение
+        super().closeEvent(event)
 

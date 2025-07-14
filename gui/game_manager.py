@@ -1,5 +1,5 @@
 # gui/game_manager.py
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
 from src.api import create_new_game, place_ship, validate_full_battlefield
 from src.main import BattleField, VERTICAL_KEYS, HORIZONTAL_KEYS # Импортируем для логики расстановки
 
@@ -12,7 +12,7 @@ class GameManager:
     def __init__(self):
         self.battlefields: Dict[str, BattleField] = {}
         self.current_player_placement_coords: Dict[str, List[Tuple[str, str]]] = {}
-        self.game_phase: str = "setup" # "setup", "placement", "pre_game_ready", "in_progress", "game_over"
+        self.game_phase: str = "setup" # "setup", "placement", "pre_game_ready", "in_progress", "game_over", "network_setup"
 
         # Определяем количество кораблей каждого типа для стандартного Морского боя
         # 4-палубный, 3-палубный (x2), 2-палубный (x3), 1-палубный (x4)
@@ -24,13 +24,18 @@ class GameManager:
         }
         # Отслеживает, сколько кораблей каждого типа уже расставлено каждым игроком
         self.ships_placed_count: Dict[str, Dict[int, int]] = {}
+        self.players_placement_complete: Dict[str, bool] = {} # Для отслеживания завершения расстановки в сетевой игре
+        self.current_turn_player_name: Optional[str] = None # Для отслеживания, чей сейчас ход в сетевой игре
+
 
     def reset_game(self):
         """Сбрасывает состояние игры для новой игры."""
         self.battlefields = {}
         self.current_player_placement_coords = {}
         self.ships_placed_count = {}
+        self.players_placement_complete = {}
         self.game_phase = "setup"
+        self.current_turn_player_name = None
 
     def set_game_phase(self, phase: str):
         """Устанавливает текущую фазу игры."""
@@ -43,6 +48,21 @@ class GameManager:
             self.current_player_placement_coords[player_name] = []
             # Инициализируем счетчики кораблей для этого игрока
             self.ships_placed_count[player_name] = {length: 0 for length in self.ship_lengths_to_place}
+            self.players_placement_complete[player_name] = False
+
+    def set_player_placement_complete(self, player_name: str, complete: bool):
+        """Устанавливает статус завершения расстановки для игрока."""
+        if player_name in self.players_placement_complete:
+            self.players_placement_complete[player_name] = complete
+
+    def are_all_players_placed(self) -> bool:
+        """Проверяет, расставили ли все игроки свои корабли."""
+        return all(self.players_placement_complete.values())
+
+    def set_current_turn_player_name(self, player_name: str):
+        """Устанавливает имя игрока, чей сейчас ход."""
+        self.current_turn_player_name = player_name
+
 
     def handle_placement_click(self, player_name: str, clicked_coord: Tuple[str, str]) -> Dict[str, Any]:
         """
