@@ -13,6 +13,7 @@ from src.api import create_new_game, place_ship, make_shot, get_board_state, is_
 from src.main import BattleField # Импорт BattleField для подсказок типов
 from src.network_manager import NetworkHost, NetworkClient, NetworkManager # Импорт сетевых классов
 import threading # Для запуска сетевых операций в отдельном потоке
+import sys # Для sys.exit()
 
 class MainWindow(QMainWindow):
     """
@@ -72,7 +73,10 @@ class MainWindow(QMainWindow):
         self.message_label.setStyleSheet("font-size: 14px; color: #333;")
 
         self.reset_button = QPushButton("Начать новую игру (Локально)")
-        self.network_game_button = QPushButton("Сетевая игра") # Новая кнопка
+        self.network_game_button = QPushButton("Сетевая игра") # Кнопка для настройки сетевой игры
+        self.new_network_game_button = QPushButton("Новая сетевая игра (Без переподключения)") # Новая кнопка
+        self.new_network_game_button.setEnabled(False) # Изначально отключена
+
         self.start_game_button = QPushButton("Начать битву!")
         self.start_game_button.setEnabled(False) # Включить после расстановки всех кораблей
 
@@ -81,7 +85,8 @@ class MainWindow(QMainWindow):
         self.info_layout.addStretch() # Отталкивает содержимое вверх
         self.info_layout.addWidget(self.start_game_button)
         self.info_layout.addWidget(self.reset_button)
-        self.info_layout.addWidget(self.network_game_button) # Добавляем новую кнопку
+        self.info_layout.addWidget(self.network_game_button)
+        self.info_layout.addWidget(self.new_network_game_button) # Добавляем новую кнопку
 
     def _setup_layout(self):
         """Настраивает основной макет окна."""
@@ -93,6 +98,7 @@ class MainWindow(QMainWindow):
         """Подключает сигналы виджетов к соответствующим слотам."""
         self.reset_button.clicked.connect(self._initialize_game)
         self.network_game_button.clicked.connect(self._start_network_game_setup) # Подключаем новую кнопку
+        self.new_network_game_button.clicked.connect(self._start_new_network_game) # Подключаем новую кнопку
         self.start_game_button.clicked.connect(self._start_game_phase)
         # Подключаем оба виджета поля к одному обработчику кликов
         self.player1_board_widget.cell_clicked.connect(lambda x, y: self._on_board_click(self.player1_board_widget, x, y))
@@ -136,6 +142,7 @@ class MainWindow(QMainWindow):
         if self.network_manager:
             self.network_manager.shutdown()
             self.network_manager = None
+        self.new_network_game_button.setEnabled(False) # Отключаем кнопку "Новая сетевая игра" для локального режима
 
         self.game_manager.reset_game()
         self.players = []
@@ -171,6 +178,7 @@ class MainWindow(QMainWindow):
         if self.network_manager: # Если уже есть активное сетевое соединение
             self.network_manager.shutdown()
             self.network_manager = None
+        self.new_network_game_button.setEnabled(False) # Отключаем, так как это новая настройка
 
         network_dialog = NetworkSetupDialog(self)
         if network_dialog.exec() == NetworkSetupDialog.Accepted:
@@ -208,6 +216,7 @@ class MainWindow(QMainWindow):
             self.current_player_index = 0 # Локальный игрок всегда Игрок 1 в своем представлении
             self._update_current_player_display()
             self.start_game_button.setEnabled(False) # В сетевой игре кнопка "Начать битву" будет активирована по сети
+            self.new_network_game_button.setEnabled(False) # Отключаем до подключения
 
             self.game_manager.set_game_phase("network_setup")
             self._update_board_displays() # Обновляем, чтобы показать пустые поля
@@ -215,6 +224,41 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.information(self, "Сетевая игра отменена", "Настройка сетевой игры была отменена. Возврат к локальной игре.")
             self._initialize_game() # Возвращаемся к локальной игре
+
+    def _start_new_network_game(self):
+        """
+        Начинает новую сетевую игру, не отключая существующее сетевое соединение.
+        """
+        if not self.network_manager or not self.network_manager.is_connected:
+            QMessageBox.warning(self, "Ошибка", "Нет активного сетевого соединения для начала новой сетевой игры.")
+            self.new_network_game_button.setEnabled(False)
+            return
+
+        # Сброс состояния игры, но сохранение сетевого менеджера
+        self.game_manager.reset_game()
+        # Повторно добавляем игроков, чтобы инициализировать их поля и счетчики кораблей
+        for name in self.players:
+            self.game_manager.add_player(name)
+
+        self.current_player_index = 0 # Локальный игрок всегда Игрок 1 в своем представлении
+        self._update_current_player_display()
+
+        self.message_label.setText(f"{self.players[self.current_player_index]}, расставьте свои корабли! ({self.game_manager._get_remaining_ships_message(self.players[self.current_player_index])})")
+        self.start_game_button.setEnabled(False) # Отключить до расстановки
+        self.new_network_game_button.setEnabled(False) # Отключить до расстановки и готовности
+
+        self.game_manager.set_game_phase("placement")
+        self._update_board_displays() # Обновляем, чтобы показать поля для расстановки
+
+        # Отправляем сообщение противнику, что мы начинаем новую игру
+        if self.network_manager.is_connected:
+            self.network_manager.send_game_data("new_game_request", {
+                "player_name": self.players[self.current_player_index] # Отправляем свое имя
+            })
+            self.message_label.setText("Запрошена новая сетевая игра. Ожидание ответа противника...")
+            # Блокируем расстановку до подтверждения от противника
+            self.player1_board_widget.set_interactive(False)
+
 
     def _handle_network_status_update(self, is_connected: bool, message: str):
         """Обрабатывает обновления статуса сетевого соединения."""
@@ -225,6 +269,7 @@ class MainWindow(QMainWindow):
             self.game_manager.set_game_phase("placement")
             self.message_label.setText(f"{self.players[self.current_player_index]}, расставьте свои корабли! ({self.game_manager._get_remaining_ships_message(self.players[self.current_player_index])})")
             self._update_board_displays()
+            self.new_network_game_button.setEnabled(True) # Включаем кнопку "Новая сетевая игра"
         elif not is_connected and self.game_manager.game_phase != "network_setup":
             QMessageBox.critical(self, "Ошибка сети", f"Соединение потеряно: {message}. Игра будет перезапущена локально.")
             self._initialize_game() # Перезапускаем локальную игру при потере соединения
@@ -248,12 +293,15 @@ class MainWindow(QMainWindow):
 
         elif msg_type == "shot":
             # Получен выстрел от противника
-            opponent_player_name = self.players[self._get_opponent_index()]
             local_player_name = self.players[self.current_player_index] # Это наше поле, по которому стреляли
-            
-            # Проверяем, что это действительно наш ход, чтобы получить выстрел
-            if self.game_manager.current_turn_player_name != local_player_name:
-                QMessageBox.warning(self, "Ошибка хода", "Получен выстрел не в наш ход! Синхронизация нарушена.")
+            opponent_player_name = self.players[self._get_opponent_index()]
+
+            # Когда мы получаем сообщение "shot", это означает, что противник только что выстрелил.
+            # Следовательно, сейчас должен быть ход противника.
+            # Если по какой-то причине current_turn_player_name указывает на нашего локального игрока,
+            # это означает рассинхронизацию.
+            if self.game_manager.current_turn_player_name == local_player_name:
+                QMessageBox.warning(self, "Ошибка хода", "Получен выстрел в ваш ход, но это ход противника! Синхронизация нарушена.")
                 return
 
             x, y = payload["x"], payload["y"]
@@ -356,6 +404,44 @@ class MainWindow(QMainWindow):
                 else: # Если ход противника
                     self.message_label.setText(f"Ход противника. Ожидаем выстрела от {self.players[1]}.")
 
+        elif msg_type == "new_game_request":
+            # Получен запрос на новую игру от противника
+            if self.network_game_mode != "local":
+                reply = QMessageBox.question(self, "Новая игра",
+                                             f"Игрок {payload.get('player_name', 'противник')} предлагает начать новую сетевую игру. Начать?",
+                                             QMessageBox.Yes | QMessageBox.No)
+                if reply == QMessageBox.Yes:
+                    self.game_manager.reset_game()
+                    # Повторно добавляем игроков, чтобы инициализировать их поля и счетчики кораблей
+                    for name in self.players:
+                        self.game_manager.add_player(name)
+
+                    self.current_player_index = 0 # Локальный игрок всегда Игрок 1 в своем представлении
+                    self._update_current_player_display()
+                    self.message_label.setText(f"{self.players[self.current_player_index]}, расставьте свои корабли! ({self.game_manager._get_remaining_ships_message(self.players[self.current_player_index])})")
+                    self.start_game_button.setEnabled(False)
+                    self.new_network_game_button.setEnabled(False) # Отключить до расстановки и готовности
+                    self.game_manager.set_game_phase("placement")
+                    self._update_board_displays()
+                    self.network_manager.send_game_data("new_game_response", {"accepted": True})
+                    self.player1_board_widget.set_interactive(True) # Разблокируем для расстановки
+                else:
+                    self.network_manager.send_game_data("new_game_response", {"accepted": False})
+                    self.message_label.setText("Запрос на новую игру отклонен.")
+                    self.new_network_game_button.setEnabled(True) # Если отклонили, можно снова запросить
+
+        elif msg_type == "new_game_response":
+            # Получен ответ на наш запрос новой игры
+            if payload["accepted"]:
+                QMessageBox.information(self, "Новая игра", "Противник принял запрос на новую игру. Приступайте к расстановке!")
+                self.message_label.setText(f"{self.players[self.current_player_index]}, расставьте свои корабли! ({self.game_manager._get_remaining_ships_message(self.players[self.current_player_index])})")
+                self.player1_board_widget.set_interactive(True) # Разблокируем для расстановки
+                self.new_network_game_button.setEnabled(False) # Отключить до расстановки и готовности
+            else:
+                QMessageBox.warning(self, "Новая игра", "Противник отклонил запрос на новую игру.")
+                self.message_label.setText("Противник отклонил запрос на новую игру. Продолжайте текущую или начните новую локальную.")
+                self.new_network_game_button.setEnabled(True) # Если отклонили, можно снова запросить
+
 
     def _update_current_player_display(self):
         """Обновляет метку с именем текущего игрока."""
@@ -407,8 +493,11 @@ class MainWindow(QMainWindow):
                 self.player1_label.setText(f"{player1_name}'s Board (Ваши корабли)")
                 self.player2_label.setText(f"{player2_name}'s Board (Скрыто)")
 
-                self.player1_board_widget.set_interactive(True) # Свое поле интерактивно для расстановки
-                self.player2_board_widget.set_interactive(False) # Поле противника не интерактивно
+                # Интерактивность для расстановки в сетевой игре
+                # Она будет управляться _handle_network_message для new_game_response
+                # Изначально интерактивно, пока не отправится запрос на новую игру
+                self.player1_board_widget.set_interactive(True)
+                self.player2_board_widget.set_interactive(False)
 
                 self.player1_board_widget.highlight_cells(self.game_manager.current_player_placement_coords[player1_name])
                 self.player2_board_widget.highlight_cells([])
