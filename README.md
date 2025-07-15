@@ -1,4 +1,4 @@
-Скачайте ['последнюю версию'](https://github.com/HAJEMET-chan/battleships/releases/tag/v1.0.0)
+Скачайте ['последнюю версию'](https://github.com/HAJEMET-chan/battleships/releases/tag/v2.0.0)
 
 Морской Бой: Настольная Игра
 
