@@ -2,9 +2,8 @@
 from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QMessageBox
 from PySide6.QtCore import Qt, Signal, QTimer # Импортируем QTimer для безопасного обновления GUI из потоков
 from PySide6.QtGui import QColor, QBrush, QPainter
-from typing import Dict, Any, Optional
+from typing import Optional, Dict, Any
 import sys
-
 
 from .game_board_widget import GameBoardWidget
 from .player_setup_dialog import PlayerSetupDialog
@@ -336,14 +335,26 @@ class MainWindow(QMainWindow):
             if self.network_game_mode == "client":
                 self.message_label.setText("Хост начал игру! Приготовьтесь к битве.")
                 self.game_manager.set_game_phase("in_progress")
-                # Ход определяется хостом, устанавливаем его в game_manager
-                self.game_manager.set_current_turn_player_name(self.players[payload["starting_player_index"]])
+                
+                # Определяем, кто начинает, на основе индекса хоста
+                # Если хост говорит, что игрок с индексом 0 (игрок хоста) начинает,
+                # то для клиента это означает, что начинает противник (players[1]).
+                # Если хост говорит, что игрок с индексом 1 (игрок клиента) начинает,
+                # то для клиента это означает, что начинает локальный игрок (players[0]).
+                # Текущая логика хоста всегда отправляет 0, означая, что хост начинает.
+                if payload["starting_player_index"] == 0: # Игрок хоста начинает
+                    self.game_manager.set_current_turn_player_name(self.players[1]) # Для клиента это противник
+                else: # Игрок клиента начинает (если хост когда-либо отправит это)
+                    self.game_manager.set_current_turn_player_name(self.players[0]) # Для клиента это локальный игрок
+
                 self._update_current_player_display()
                 self._update_board_displays() # Обновит интерактивность на основе current_turn_player_name
+
+                # Обновляем сообщение в зависимости от того, кто на самом деле начинает
                 if self.game_manager.current_turn_player_name == self.players[0]: # Если наш ход
                     self.message_label.setText(f"Ваш ход, {self.players[0]}! Выстрелите по полю противника.")
-                else:
-                    self.message_label.setText(f"Ход противника. Ожидаем выстрела от {self.players[self._get_opponent_index()]}.")
+                else: # Если ход противника
+                    self.message_label.setText(f"Ход противника. Ожидаем выстрела от {self.players[1]}.")
 
 
     def _update_current_player_display(self):
@@ -522,36 +533,48 @@ class MainWindow(QMainWindow):
         Переводит игру в фазу сражения после расстановки кораблей.
         Включает валидацию полей.
         """
-        # Валидируем оба поля перед началом игры
-        player1_bf = self.game_manager.battlefields[self.players[0]]
-        player2_bf = self.game_manager.battlefields[self.players[1]]
+        local_player_name = self.players[0]
+        opponent_player_name = self.players[1]
 
-        validation1 = validate_full_battlefield(player1_bf)
-        validation2 = validate_full_battlefield(player2_bf)
+        # Валидируем только поле локального игрока
+        local_player_bf = self.game_manager.battlefields[local_player_name]
+        validation_local = validate_full_battlefield(local_player_bf)
 
-        if not validation1["is_valid"]:
-            QMessageBox.critical(self, "Ошибка валидации", f"Поле {self.players[0]} недействительно: {validation1['message']}")
+        if not validation_local["is_valid"]:
+            QMessageBox.critical(self, "Ошибка валидации", f"Поле {local_player_name} недействительно: {validation_local['message']}")
             return
-        if not validation2["is_valid"]:
-            QMessageBox.critical(self, "Ошибка валидации", f"Поле {self.players[1]} недействительно: {validation2['message']}")
-            return
-
-        self.game_manager.set_game_phase("in_progress")
-        self.start_game_button.setEnabled(False)
 
         if self.network_game_mode == "local":
+            # В локальной игре валидируем поле второго игрока тоже
+            opponent_bf_local = self.game_manager.battlefields[opponent_player_name]
+            validation_opponent_local = validate_full_battlefield(opponent_bf_local)
+            if not validation_opponent_local["is_valid"]:
+                QMessageBox.critical(self, "Ошибка валидации", f"Поле {opponent_player_name} недействительно: {validation_opponent_local['message']}")
+                return
+
             self.current_player_index = 0 # Игрок 1 начинает первым
             self.game_manager.set_current_turn_player_name(self.players[self.current_player_index]) # Устанавливаем текущий ход
             self._update_current_player_display()
             self.message_label.setText(f"{self.players[self.current_player_index]}, ваш ход! Выстрелите по полю {self.players[self._get_opponent_index()]}.")
-        else: # Сетевая игра
-            # Хост определяет, кто начинает первым (например, всегда хост)
-            starting_player_name = self.players[0] # Локальный игрок (хост) начинает
-            self.game_manager.set_current_turn_player_name(starting_player_name)
-            # Отправляем сообщение клиенту о начале игры и кто начинает
-            self.network_manager.send_game_data("game_start", {"starting_player_index": 0}) # 0 - это всегда локальный игрок
-            self.message_label.setText(f"Вы начинаете! Ваш ход, {self.players[0]}! Выстрелите по полю противника.")
+        else: # Сетевая игра (хост или клиент)
+            # В сетевой игре, если мы хост, мы должны убедиться, что клиент тоже готов
+            if self.network_game_mode == "host":
+                if not self.game_manager.players_placement_complete[opponent_player_name]:
+                    QMessageBox.warning(self, "Ожидание игрока", f"{opponent_player_name} еще не закончил расстановку кораблей. Пожалуйста, подождите.")
+                    return
+                
+                starting_player_name = local_player_name # Хост (локальный игрок) начинает
+                self.game_manager.set_current_turn_player_name(starting_player_name)
+                # Отправляем сообщение клиенту о начале игры и кто начинает
+                self.network_manager.send_game_data("game_start", {"starting_player_index": 0}) # 0 - это всегда локальный игрок
+                self.message_label.setText(f"Вы начинаете! Ваш ход, {local_player_name}! Выстрелите по полю противника.")
+            else: # Если мы клиент, мы не должны нажимать "Начать битву!"
+                QMessageBox.warning(self, "Ошибка", "Только хост может начать битву.")
+                return
 
+
+        self.game_manager.set_game_phase("in_progress")
+        self.start_game_button.setEnabled(False) # Отключаем кнопку "Начать битву" после старта
 
         # Устанавливаем интерактивность полей для фазы стрельбы
         self._update_board_displays() # Обновляем, чтобы установить правильную интерактивность
@@ -616,12 +639,12 @@ class MainWindow(QMainWindow):
         # В сетевой игре current_player_index всегда 0 (локальный игрок)
         # Мы просто меняем, чей ход в game_manager
         current_turn_player = self.game_manager.current_turn_player_name
-        if current_turn_player == self.players[0]: # Если был наш ход
+        if current_turn_player == self.players[0]: # Если был наш ход (локальный игрок)
             self.game_manager.set_current_turn_player_name(self.players[1]) # Ход противника
             self.message_label.setText(f"Ход противника. Ожидаем выстрела от {self.players[self._get_opponent_index()]}.")
-            self.player2_board_widget.set_interactive(False) # Блокируем свое поле
+            self.player2_board_widget.set_interactive(False) # Блокируем поле противника для стрельбы
         else: # Если был ход противника
-            self.game_manager.set_current_turn_player_name(self.players[0]) # Наш ход
+            self.game_manager.set_current_turn_player_name(self.players[0]) # Наш ход (локальный игрок)
             self.message_label.setText(f"Ваш ход, {self.players[self.current_player_index]}! Выстрелите по полю противника.")
             self.player2_board_widget.set_interactive(True) # Разблокируем поле противника для выстрела
 
